@@ -1,8 +1,9 @@
 package graphql.language;
 
-import graphql.GraphQLException;
 import graphql.Internal;
+import graphql.execution.UnknownOperationException;
 import graphql.util.FpKit;
+import graphql.util.NodeLocation;
 
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -42,6 +43,18 @@ public class NodeUtil {
         public Map<String, FragmentDefinition> fragmentsByName;
     }
 
+    public static Map<String, FragmentDefinition> getFragmentsByName(Document document) {
+        Map<String, FragmentDefinition> fragmentsByName = new LinkedHashMap<>();
+
+        for (Definition definition : document.getDefinitions()) {
+            if (definition instanceof FragmentDefinition) {
+                FragmentDefinition fragmentDefinition = (FragmentDefinition) definition;
+                fragmentsByName.put(fragmentDefinition.getName(), fragmentDefinition);
+            }
+        }
+        return fragmentsByName;
+    }
+
     public static GetOperationResult getOperation(Document document, String operationName) {
 
 
@@ -59,7 +72,7 @@ public class NodeUtil {
             }
         }
         if (operationName == null && operationsByName.size() > 1) {
-            throw new GraphQLException("missing operation name");
+            throw new UnknownOperationException("Must provide operation name if query contains multiple operations.");
         }
         OperationDefinition operation;
 
@@ -69,11 +82,23 @@ public class NodeUtil {
             operation = operationsByName.get(operationName);
         }
         if (operation == null) {
-            throw new GraphQLException("no operation found");
+            throw new UnknownOperationException(String.format("Unknown operation named '%s'.", operationName));
         }
         GetOperationResult result = new GetOperationResult();
         result.fragmentsByName = fragmentsByName;
         result.operationDefinition = operation;
         return result;
+    }
+
+    public static void assertNewChildrenAreEmpty(NodeChildrenContainer newChildren) {
+        if (!newChildren.isEmpty()) {
+            throw new IllegalArgumentException("Cannot pass non-empty newChildren to Node that doesn't hold children");
+        }
+    }
+
+    public static Node removeChild(Node node, NodeLocation childLocationToRemove) {
+        NodeChildrenContainer namedChildren = node.getNamedChildren();
+        NodeChildrenContainer newChildren = namedChildren.transform(builder -> builder.removeChild(childLocationToRemove.getName(), childLocationToRemove.getIndex()));
+        return node.withNewChildren(newChildren);
     }
 }

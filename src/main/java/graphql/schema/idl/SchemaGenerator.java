@@ -2,7 +2,6 @@ package graphql.schema.idl;
 
 import graphql.GraphQLError;
 import graphql.PublicApi;
-import graphql.introspection.Introspection;
 import graphql.introspection.Introspection.DirectiveLocation;
 import graphql.language.Directive;
 import graphql.language.EnumTypeDefinition;
@@ -29,7 +28,9 @@ import graphql.language.Value;
 import graphql.schema.DataFetcher;
 import graphql.schema.DataFetcherFactories;
 import graphql.schema.DataFetcherFactory;
+import graphql.schema.FieldCoordinates;
 import graphql.schema.GraphQLArgument;
+import graphql.schema.GraphQLCodeRegistry;
 import graphql.schema.GraphQLDirective;
 import graphql.schema.GraphQLEnumType;
 import graphql.schema.GraphQLEnumValueDefinition;
@@ -46,35 +47,38 @@ import graphql.schema.GraphQLType;
 import graphql.schema.GraphQLTypeReference;
 import graphql.schema.GraphQLUnionType;
 import graphql.schema.PropertyDataFetcher;
+import graphql.schema.SchemaTransformer;
 import graphql.schema.TypeResolver;
 import graphql.schema.TypeResolverProxy;
 import graphql.schema.idl.errors.NotAnInputTypeError;
 import graphql.schema.idl.errors.NotAnOutputTypeError;
 import graphql.schema.idl.errors.SchemaProblem;
 
+import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collection;
 import java.util.Collections;
-import java.util.HashMap;
-import java.util.HashSet;
+import java.util.Deque;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
-import java.util.Stack;
+import java.util.function.Function;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
 import static graphql.Assert.assertNotNull;
-import static graphql.DirectivesUtil.atFetchFromSupport;
 import static graphql.introspection.Introspection.DirectiveLocation.ARGUMENT_DEFINITION;
 import static graphql.introspection.Introspection.DirectiveLocation.ENUM;
 import static graphql.introspection.Introspection.DirectiveLocation.ENUM_VALUE;
 import static graphql.introspection.Introspection.DirectiveLocation.INPUT_FIELD_DEFINITION;
 import static graphql.introspection.Introspection.DirectiveLocation.INPUT_OBJECT;
 import static graphql.introspection.Introspection.DirectiveLocation.OBJECT;
+import static graphql.introspection.Introspection.DirectiveLocation.SCALAR;
 import static graphql.introspection.Introspection.DirectiveLocation.UNION;
 import static graphql.schema.GraphQLEnumValueDefinition.newEnumValueDefinition;
 import static graphql.schema.GraphQLTypeReference.typeRef;
@@ -87,20 +91,63 @@ import static java.util.Collections.emptyList;
 public class SchemaGenerator {
 
     /**
+     * These options control how the schema generation works
+     */
+    public static class Options {
+        private final boolean enforceSchemaDirectives;
+
+        Options(boolean enforceSchemaDirectives) {
+            this.enforceSchemaDirectives = enforceSchemaDirectives;
+        }
+
+        /**
+         * This controls whether schema directives MUST be declared using
+         * directive definition syntax before use.
+         *
+         * @return true if directives must be fully declared; the default is true
+         */
+        public boolean isEnforceSchemaDirectives() {
+            return enforceSchemaDirectives;
+        }
+
+        public static Options defaultOptions() {
+            return new Options(true);
+        }
+
+        /**
+         * This controls whether schema directives MUST be declared using
+         * directive definition syntax before use.
+         *
+         * @param flag the value to use
+         *
+         * @return the new options
+         */
+        public Options enforceSchemaDirectives(boolean flag) {
+            return new Options(flag);
+        }
+
+    }
+
+
+    /**
      * We pass this around so we know what we have defined in a stack like manner plus
      * it gives us helper functions
      */
     class BuildContext {
         private final TypeDefinitionRegistry typeRegistry;
         private final RuntimeWiring wiring;
-        private final Stack<String> definitionStack = new Stack<>();
+        private final Deque<String> typeStack = new ArrayDeque<>();
 
-        private final Map<String, GraphQLOutputType> outputGTypes = new HashMap<>();
-        private final Map<String, GraphQLInputType> inputGTypes = new HashMap<>();
+        private final Map<String, GraphQLOutputType> outputGTypes = new LinkedHashMap<>();
+        private final Map<String, GraphQLInputType> inputGTypes = new LinkedHashMap<>();
+        private final Map<String, Object> directiveBehaviourContext = new LinkedHashMap<>();
+        private final Set<GraphQLDirective> directiveDefinitions = new LinkedHashSet<>();
+        private final GraphQLCodeRegistry.Builder codeRegistry;
 
         BuildContext(TypeDefinitionRegistry typeRegistry, RuntimeWiring wiring) {
             this.typeRegistry = typeRegistry;
             this.wiring = wiring;
+            this.codeRegistry = GraphQLCodeRegistry.newCodeRegistry(wiring.getCodeRegistry());
         }
 
         public TypeDefinitionRegistry getTypeRegistry() {
@@ -113,15 +160,19 @@ public class SchemaGenerator {
         }
 
         boolean stackContains(TypeInfo typeInfo) {
-            return definitionStack.contains(typeInfo.getName());
+            return typeStack.contains(typeInfo.getName());
         }
 
         void push(TypeInfo typeInfo) {
-            definitionStack.push(typeInfo.getName());
+            typeStack.push(typeInfo.getName());
         }
 
         void pop() {
-            definitionStack.pop();
+            typeStack.pop();
+        }
+
+        SchemaGeneratorDirectiveHelper.Parameters mkBehaviourParams() {
+            return new SchemaGeneratorDirectiveHelper.Parameters(typeRegistry, wiring, directiveBehaviourContext, codeRegistry);
         }
 
         GraphQLOutputType hasOutputType(TypeDefinition typeDefinition) {
@@ -132,7 +183,7 @@ public class SchemaGenerator {
             return inputGTypes.get(typeDefinition.getName());
         }
 
-        void put(GraphQLOutputType outputType) {
+        void putOutputType(GraphQLOutputType outputType) {
             outputGTypes.put(outputType.getName(), outputType);
             // certain types can be both input and output types, for example enums
             if (outputType instanceof GraphQLInputType) {
@@ -140,7 +191,7 @@ public class SchemaGenerator {
             }
         }
 
-        void put(GraphQLInputType inputType) {
+        void putInputType(GraphQLInputType inputType) {
             inputGTypes.put(inputType.getName(), inputType);
             // certain types can be both input and output types, for example enums
             if (inputType instanceof GraphQLOutputType) {
@@ -151,10 +202,23 @@ public class SchemaGenerator {
         RuntimeWiring getWiring() {
             return wiring;
         }
+
+        public GraphQLCodeRegistry.Builder getCodeRegistry() {
+            return codeRegistry;
+        }
+
+        public void setDirectiveDefinitions(Set<GraphQLDirective> directiveDefinitions) {
+            this.directiveDefinitions.addAll(directiveDefinitions);
+        }
+
+        public Set<GraphQLDirective> getDirectiveDefinitions() {
+            return directiveDefinitions;
+        }
     }
 
     private final SchemaTypeChecker typeChecker = new SchemaTypeChecker();
     private final SchemaGeneratorHelper schemaGeneratorHelper = new SchemaGeneratorHelper();
+    private final SchemaGeneratorDirectiveHelper directiveBehaviour = new SchemaGeneratorDirectiveHelper();
 
     public SchemaGenerator() {
     }
@@ -170,11 +234,33 @@ public class SchemaGenerator {
      * @throws SchemaProblem if there are problems in assembling a schema such as missing type resolvers or no operations defined
      */
     public GraphQLSchema makeExecutableSchema(TypeDefinitionRegistry typeRegistry, RuntimeWiring wiring) throws SchemaProblem {
-        List<GraphQLError> errors = typeChecker.checkTypeRegistry(typeRegistry, wiring);
+        return makeExecutableSchema(Options.defaultOptions(), typeRegistry, wiring);
+    }
+
+    /**
+     * This will take a {@link TypeDefinitionRegistry} and a {@link RuntimeWiring} and put them together to create a executable schema
+     * controlled by the provided options.
+     *
+     * @param options      the controlling options
+     * @param typeRegistry this can be obtained via {@link SchemaParser#parse(String)}
+     * @param wiring       this can be built using {@link RuntimeWiring#newRuntimeWiring()}
+     *
+     * @return an executable schema
+     *
+     * @throws SchemaProblem if there are problems in assembling a schema such as missing type resolvers or no operations defined
+     */
+    public GraphQLSchema makeExecutableSchema(Options options, TypeDefinitionRegistry typeRegistry, RuntimeWiring wiring) throws SchemaProblem {
+
+        TypeDefinitionRegistry typeRegistryCopy = new TypeDefinitionRegistry();
+        typeRegistryCopy.merge(typeRegistry);
+
+        schemaGeneratorHelper.addDeprecatedDirectiveDefinition(typeRegistryCopy);
+
+        List<GraphQLError> errors = typeChecker.checkTypeRegistry(typeRegistryCopy, wiring, options.enforceSchemaDirectives);
         if (!errors.isEmpty()) {
             throw new SchemaProblem(errors);
         }
-        BuildContext buildCtx = new BuildContext(typeRegistry, wiring);
+        BuildContext buildCtx = new BuildContext(typeRegistryCopy, wiring);
 
         return makeExecutableSchemaImpl(buildCtx);
     }
@@ -186,6 +272,10 @@ public class SchemaGenerator {
 
         GraphQLSchema.Builder schemaBuilder = GraphQLSchema.newSchema();
 
+        Set<GraphQLDirective> additionalDirectives = buildAdditionalDirectives(buildCtx);
+        schemaBuilder.additionalDirectives(additionalDirectives);
+        buildCtx.setDirectiveDefinitions(additionalDirectives);
+
         //
         // Schema can be missing if the type is called 'Query'.  Pre flight checks have checked that!
         //
@@ -194,17 +284,17 @@ public class SchemaGenerator {
             @SuppressWarnings({"OptionalGetWithoutIsPresent", "ConstantConditions"})
             TypeDefinition queryTypeDef = typeRegistry.getType("Query").get();
 
-            query = buildOutputType(buildCtx, new TypeName(queryTypeDef.getName()));
+            query = buildOutputType(buildCtx, TypeName.newTypeName().name(queryTypeDef.getName()).build());
             schemaBuilder.query(query);
 
             Optional<TypeDefinition> mutationTypeDef = typeRegistry.getType("Mutation");
             if (mutationTypeDef.isPresent()) {
-                mutation = buildOutputType(buildCtx, new TypeName(mutationTypeDef.get().getName()));
+                mutation = buildOutputType(buildCtx, TypeName.newTypeName().name((mutationTypeDef.get().getName())).build());
                 schemaBuilder.mutation(mutation);
             }
             Optional<TypeDefinition> subscriptionTypeDef = typeRegistry.getType("Subscription");
             if (subscriptionTypeDef.isPresent()) {
-                subscription = buildOutputType(buildCtx, new TypeName(subscriptionTypeDef.get().getName()));
+                subscription = buildOutputType(buildCtx, TypeName.newTypeName().name(subscriptionTypeDef.get().getName()).build());
                 schemaBuilder.subscription(subscription);
             }
         } else {
@@ -231,13 +321,24 @@ public class SchemaGenerator {
         }
 
         Set<GraphQLType> additionalTypes = buildAdditionalTypes(buildCtx);
+        schemaBuilder.additionalTypes(additionalTypes);
 
-        schemaBuilder.fieldVisibility(buildCtx.getWiring().getFieldVisibility());
-        return schemaBuilder.build(additionalTypes);
+        buildCtx.getCodeRegistry().fieldVisibility(buildCtx.getWiring().getFieldVisibility());
+
+        GraphQLCodeRegistry codeRegistry = buildCtx.getCodeRegistry().build();
+        schemaBuilder.codeRegistry(codeRegistry);
+
+        GraphQLSchema graphQLSchema = schemaBuilder.build();
+
+        Collection<SchemaTransformer> schemaTransformers = buildCtx.getWiring().getSchemaTransformers();
+        for (SchemaTransformer schemaTransformer : schemaTransformers) {
+            graphQLSchema = schemaTransformer.transform(graphQLSchema);
+        }
+        return graphQLSchema;
     }
 
     private GraphQLObjectType buildOperation(BuildContext buildCtx, OperationTypeDefinition operation) {
-        Type type = operation.getType();
+        Type type = operation.getTypeName();
 
         return buildOutputType(buildCtx, type);
     }
@@ -251,10 +352,10 @@ public class SchemaGenerator {
      * @return the additional types not referenced from the top level operations
      */
     private Set<GraphQLType> buildAdditionalTypes(BuildContext buildCtx) {
-        Set<GraphQLType> additionalTypes = new HashSet<>();
+        Set<GraphQLType> additionalTypes = new LinkedHashSet<>();
         TypeDefinitionRegistry typeRegistry = buildCtx.getTypeRegistry();
         typeRegistry.types().values().forEach(typeDefinition -> {
-            TypeName typeName = new TypeName(typeDefinition.getName());
+            TypeName typeName = TypeName.newTypeName().name(typeDefinition.getName()).build();
             if (typeDefinition instanceof InputObjectTypeDefinition) {
                 if (buildCtx.hasInputType(typeDefinition) == null) {
                     additionalTypes.add(buildInputType(buildCtx, typeName));
@@ -268,6 +369,17 @@ public class SchemaGenerator {
         return additionalTypes;
     }
 
+    private Set<GraphQLDirective> buildAdditionalDirectives(BuildContext buildCtx) {
+        Set<GraphQLDirective> additionalDirectives = new LinkedHashSet<>();
+        TypeDefinitionRegistry typeRegistry = buildCtx.getTypeRegistry();
+        typeRegistry.getDirectiveDefinitions().values().forEach(directiveDefinition -> {
+            Function<Type, GraphQLInputType> inputTypeFactory = inputType -> buildInputType(buildCtx, inputType);
+            GraphQLDirective directive = schemaGeneratorHelper.buildDirectiveFromDefinition(directiveDefinition, inputTypeFactory);
+            additionalDirectives.add(directive);
+        });
+        return additionalDirectives;
+    }
+
     /**
      * This is the main recursive spot that builds out the various forms of Output types
      *
@@ -276,7 +388,7 @@ public class SchemaGenerator {
      *
      * @return an output type
      */
-    @SuppressWarnings("unchecked")
+    @SuppressWarnings({"unchecked", "TypeParameterUnusedInFormals"})
     private <T extends GraphQLOutputType> T buildOutputType(BuildContext buildCtx, Type rawType) {
 
         TypeDefinition typeDefinition = buildCtx.getTypeDefinition(rawType);
@@ -307,10 +419,10 @@ public class SchemaGenerator {
             outputType = buildScalar(buildCtx, (ScalarTypeDefinition) typeDefinition);
         } else {
             // typeDefinition is not a valid output type
-            throw new NotAnOutputTypeError(typeDefinition);
+            throw new NotAnOutputTypeError(rawType, typeDefinition);
         }
 
-        buildCtx.put(outputType);
+        buildCtx.putOutputType(outputType);
         buildCtx.pop();
         return (T) typeInfo.decorate(outputType);
     }
@@ -340,16 +452,15 @@ public class SchemaGenerator {
             inputType = buildScalar(buildCtx, (ScalarTypeDefinition) typeDefinition);
         } else {
             // typeDefinition is not a valid InputType
-            throw new NotAnInputTypeError(typeDefinition);
+            throw new NotAnInputTypeError(rawType, typeDefinition);
         }
 
-        buildCtx.put(inputType);
+        buildCtx.putInputType(inputType);
         buildCtx.pop();
         return typeInfo.decorate(inputType);
     }
 
     private GraphQLObjectType buildObjectType(BuildContext buildCtx, ObjectTypeDefinition typeDefinition) {
-
         GraphQLObjectType.Builder builder = GraphQLObjectType.newObject();
         builder.definition(typeDefinition);
         builder.name(typeDefinition.getName());
@@ -358,30 +469,32 @@ public class SchemaGenerator {
         List<ObjectTypeExtensionDefinition> extensions = objectTypeExtensions(typeDefinition, buildCtx);
         builder.withDirectives(
                 buildDirectives(typeDefinition.getDirectives(),
-                        directivesOf(extensions), OBJECT)
+                        directivesOf(extensions), OBJECT, buildCtx.getDirectiveDefinitions())
         );
 
         typeDefinition.getFieldDefinitions().forEach(fieldDef -> {
-            GraphQLFieldDefinition newFieldDefinition = buildField(buildCtx, typeDefinition, fieldDef);
-            builder.field(newFieldDefinition);
+            GraphQLFieldDefinition fieldDefinition = buildField(buildCtx, typeDefinition, fieldDef);
+            builder.field(fieldDefinition);
         });
 
         extensions.forEach(extension -> extension.getFieldDefinitions().forEach(fieldDef -> {
-            GraphQLFieldDefinition newFieldDefinition = buildField(buildCtx, typeDefinition, fieldDef);
-            if (!builder.hasField(newFieldDefinition.getName())) {
-                builder.field(newFieldDefinition);
+            GraphQLFieldDefinition fieldDefinition = buildField(buildCtx, typeDefinition, fieldDef);
+            if (!builder.hasField(fieldDefinition.getName())) {
+                builder.field(fieldDefinition);
             }
         }));
 
         buildObjectTypeInterfaces(buildCtx, typeDefinition, builder, extensions);
 
-        return builder.build();
+        GraphQLObjectType objectType = builder.build();
+        objectType = directiveBehaviour.onObject(objectType, buildCtx.mkBehaviourParams());
+        return objectType;
     }
 
     private void buildObjectTypeInterfaces(BuildContext buildCtx, ObjectTypeDefinition typeDefinition, GraphQLObjectType.Builder builder, List<ObjectTypeExtensionDefinition> extensions) {
-        Map<String, GraphQLInterfaceType> interfaces = new LinkedHashMap<>();
+        Map<String, GraphQLOutputType> interfaces = new LinkedHashMap<>();
         typeDefinition.getImplements().forEach(type -> {
-            GraphQLInterfaceType newInterfaceType = buildOutputType(buildCtx, type);
+            GraphQLOutputType newInterfaceType = buildOutputType(buildCtx, type);
             interfaces.put(newInterfaceType.getName(), newInterfaceType);
         });
 
@@ -392,9 +505,16 @@ public class SchemaGenerator {
             }
         }));
 
-        interfaces.values().forEach(builder::withInterface);
+        interfaces.values().forEach(interfaze -> {
+            if (interfaze instanceof GraphQLInterfaceType) {
+                builder.withInterface((GraphQLInterfaceType) interfaze);
+                return;
+            }
+            if (interfaze instanceof GraphQLTypeReference) {
+                builder.withInterface((GraphQLTypeReference) interfaze);
+            }
+        });
     }
-
 
     private GraphQLInterfaceType buildInterfaceType(BuildContext buildCtx, InterfaceTypeDefinition typeDefinition) {
         GraphQLInterfaceType.Builder builder = GraphQLInterfaceType.newInterface();
@@ -402,25 +522,33 @@ public class SchemaGenerator {
         builder.name(typeDefinition.getName());
         builder.description(schemaGeneratorHelper.buildDescription(typeDefinition, typeDefinition.getDescription()));
 
-        builder.typeResolver(getTypeResolverForInterface(buildCtx, typeDefinition));
 
         List<InterfaceTypeExtensionDefinition> extensions = interfaceTypeExtensions(typeDefinition, buildCtx);
         builder.withDirectives(
                 buildDirectives(typeDefinition.getDirectives(),
-                        directivesOf(extensions), OBJECT)
+                        directivesOf(extensions), OBJECT, buildCtx.getDirectiveDefinitions())
         );
 
-        typeDefinition.getFieldDefinitions().forEach(fieldDef ->
-                builder.field(buildField(buildCtx, typeDefinition, fieldDef)));
+        typeDefinition.getFieldDefinitions().forEach(fieldDef -> {
+            GraphQLFieldDefinition fieldDefinition = buildField(buildCtx, typeDefinition, fieldDef);
+            builder.field(fieldDefinition);
+        });
 
         extensions.forEach(extension -> extension.getFieldDefinitions().forEach(fieldDef -> {
-            GraphQLFieldDefinition field = buildField(buildCtx, typeDefinition, fieldDef);
-            if (!builder.hasField(field.getName())) {
-                builder.field(field);
+            GraphQLFieldDefinition fieldDefinition = buildField(buildCtx, typeDefinition, fieldDef);
+            if (!builder.hasField(fieldDefinition.getName())) {
+                builder.field(fieldDefinition);
             }
         }));
 
-        return builder.build();
+        GraphQLInterfaceType interfaceType = builder.build();
+        if (!buildCtx.codeRegistry.hasTypeResolver(interfaceType.getName())) {
+            TypeResolver typeResolver = getTypeResolverForInterface(buildCtx, typeDefinition);
+            buildCtx.getCodeRegistry().typeResolver(interfaceType, typeResolver);
+        }
+
+        interfaceType = directiveBehaviour.onInterface(interfaceType, buildCtx.mkBehaviourParams());
+        return interfaceType;
     }
 
     private GraphQLUnionType buildUnionType(BuildContext buildCtx, UnionTypeDefinition typeDefinition) {
@@ -428,7 +556,6 @@ public class SchemaGenerator {
         builder.definition(typeDefinition);
         builder.name(typeDefinition.getName());
         builder.description(schemaGeneratorHelper.buildDescription(typeDefinition, typeDefinition.getDescription()));
-        builder.typeResolver(getTypeResolverForUnion(buildCtx, typeDefinition));
 
         List<UnionTypeExtensionDefinition> extensions = unionTypeExtensions(typeDefinition, buildCtx);
 
@@ -443,7 +570,7 @@ public class SchemaGenerator {
 
         builder.withDirectives(
                 buildDirectives(typeDefinition.getDirectives(),
-                        directivesOf(extensions), UNION)
+                        directivesOf(extensions), UNION, buildCtx.getDirectiveDefinitions())
         );
 
         extensions.forEach(extension -> extension.getMemberTypes().forEach(mt -> {
@@ -458,7 +585,13 @@ public class SchemaGenerator {
                 }
         ));
 
-        return builder.build();
+        GraphQLUnionType unionType = builder.build();
+        if (!buildCtx.codeRegistry.hasTypeResolver(unionType.getName())) {
+            TypeResolver typeResolver = getTypeResolverForUnion(buildCtx, typeDefinition);
+            buildCtx.getCodeRegistry().typeResolver(unionType, typeResolver);
+        }
+        unionType = directiveBehaviour.onUnion(unionType, buildCtx.mkBehaviourParams());
+        return unionType;
     }
 
     private GraphQLEnumType buildEnumType(BuildContext buildCtx, EnumTypeDefinition typeDefinition) {
@@ -484,10 +617,12 @@ public class SchemaGenerator {
 
         builder.withDirectives(
                 buildDirectives(typeDefinition.getDirectives(),
-                        directivesOf(extensions), ENUM)
+                        directivesOf(extensions), ENUM, buildCtx.getDirectiveDefinitions())
         );
 
-        return builder.build();
+        GraphQLEnumType enumType = builder.build();
+        enumType = directiveBehaviour.onEnum(enumType, buildCtx.mkBehaviourParams());
+        return enumType;
     }
 
     private GraphQLEnumValueDefinition buildEnumValue(BuildContext buildCtx, EnumTypeDefinition typeDefinition, EnumValuesProvider enumValuesProvider, EnumValueDefinition evd) {
@@ -506,9 +641,10 @@ public class SchemaGenerator {
                 .value(value)
                 .description(description)
                 .deprecationReason(deprecation)
+                .definition(evd)
                 .withDirectives(
                         buildDirectives(evd.getDirectives(),
-                                emptyList(), ENUM_VALUE)
+                                emptyList(), ENUM_VALUE, buildCtx.getDirectiveDefinitions())
                 )
                 .build();
     }
@@ -521,11 +657,25 @@ public class SchemaGenerator {
 
         ScalarWiringEnvironment environment = new ScalarWiringEnvironment(typeRegistry, typeDefinition, extensions);
 
+        GraphQLScalarType scalar;
         if (wiringFactory.providesScalar(environment)) {
-            return wiringFactory.getScalar(environment);
+            scalar = wiringFactory.getScalar(environment);
         } else {
-            return buildCtx.getWiring().getScalars().get(typeDefinition.getName());
+            scalar = buildCtx.getWiring().getScalars().get(typeDefinition.getName());
         }
+
+        if (!ScalarInfo.isStandardScalar(scalar) && !ScalarInfo.isGraphqlSpecifiedScalar(scalar)) {
+            scalar = scalar.transform(builder -> builder
+                    .definition(typeDefinition)
+                    .withDirectives(
+                            buildDirectives(typeDefinition.getDirectives(),
+                                    directivesOf(extensions), SCALAR, buildCtx.getDirectiveDefinitions())
+                    ));
+            //
+            // only allow modification of custom scalars
+            scalar = directiveBehaviour.onScalar(scalar, buildCtx.mkBehaviourParams());
+        }
+        return scalar;
     }
 
     private GraphQLFieldDefinition buildField(BuildContext buildCtx, TypeDefinition parentType, FieldDefinition fieldDef) {
@@ -536,7 +686,7 @@ public class SchemaGenerator {
         builder.deprecate(schemaGeneratorHelper.buildDeprecationReason(fieldDef.getDirectives()));
 
         GraphQLDirective[] directives = buildDirectives(fieldDef.getDirectives(),
-                Collections.emptyList(), Introspection.DirectiveLocation.FIELD);
+                Collections.emptyList(), DirectiveLocation.FIELD_DEFINITION, buildCtx.getDirectiveDefinitions());
         builder.withDirectives(
                 directives
         );
@@ -547,10 +697,14 @@ public class SchemaGenerator {
         GraphQLOutputType fieldType = buildOutputType(buildCtx, fieldDef.getType());
         builder.type(fieldType);
 
-        builder.dataFetcherFactory(buildDataFetcherFactory(buildCtx, parentType, fieldDef, fieldType, Arrays.asList(directives)));
-
-
-        return builder.build();
+        GraphQLFieldDefinition fieldDefinition = builder.build();
+        // if they have already wired in a fetcher - then leave it alone
+        FieldCoordinates coordinates = FieldCoordinates.coordinates(parentType.getName(), fieldDefinition.getName());
+        if (!buildCtx.codeRegistry.hasDataFetcher(coordinates)) {
+            DataFetcherFactory dataFetcherFactory = buildDataFetcherFactory(buildCtx, parentType, fieldDef, fieldType, Arrays.asList(directives));
+            buildCtx.getCodeRegistry().dataFetcher(coordinates, dataFetcherFactory);
+        }
+        return fieldDefinition;
     }
 
     private DataFetcherFactory buildDataFetcherFactory(BuildContext buildCtx, TypeDefinition parentType, FieldDefinition fieldDef, GraphQLOutputType fieldType, List<GraphQLDirective> directives) {
@@ -592,8 +746,7 @@ public class SchemaGenerator {
 
     private DataFetcher<?> dataFetcherOfLastResort(FieldWiringEnvironment environment) {
         String fieldName = environment.getFieldDefinition().getName();
-        String fetchName = atFetchFromSupport(fieldName, environment.getDirectives());
-        return new PropertyDataFetcher(fetchName);
+        return new PropertyDataFetcher(fieldName);
     }
 
     private GraphQLInputObjectType buildInputObjectType(BuildContext buildCtx, InputObjectTypeDefinition typeDefinition) {
@@ -606,7 +759,7 @@ public class SchemaGenerator {
 
         builder.withDirectives(
                 buildDirectives(typeDefinition.getDirectives(),
-                        directivesOf(extensions), INPUT_OBJECT)
+                        directivesOf(extensions), INPUT_OBJECT, buildCtx.getDirectiveDefinitions())
         );
 
         typeDefinition.getInputValueDefinitions().forEach(inputValue ->
@@ -619,7 +772,9 @@ public class SchemaGenerator {
             }
         }));
 
-        return builder.build();
+        GraphQLInputObjectType inputObjectType = builder.build();
+        inputObjectType = directiveBehaviour.onInputObjectType(inputObjectType, buildCtx.mkBehaviourParams());
+        return inputObjectType;
     }
 
     private GraphQLInputObjectField buildInputField(BuildContext buildCtx, InputValueDefinition fieldDef) {
@@ -639,7 +794,7 @@ public class SchemaGenerator {
 
         fieldBuilder.withDirectives(
                 buildDirectives(fieldDef.getDirectives(),
-                        emptyList(), INPUT_FIELD_DEFINITION)
+                        emptyList(), INPUT_FIELD_DEFINITION, buildCtx.getDirectiveDefinitions())
         );
 
         return fieldBuilder.build();
@@ -659,8 +814,9 @@ public class SchemaGenerator {
 
         builder.withDirectives(
                 buildDirectives(valueDefinition.getDirectives(),
-                        Collections.emptyList(), ARGUMENT_DEFINITION)
+                        emptyList(), ARGUMENT_DEFINITION, buildCtx.getDirectiveDefinitions())
         );
+
         return builder.build();
     }
 
@@ -713,22 +869,22 @@ public class SchemaGenerator {
     }
 
 
-    private GraphQLDirective[] buildDirectives(List<Directive> directives, List<Directive> extensionDirectives, DirectiveLocation directiveLocation) {
+    private GraphQLDirective[] buildDirectives(List<Directive> directives, List<Directive> extensionDirectives, DirectiveLocation directiveLocation, Set<GraphQLDirective> directiveDefinitions) {
         directives = directives == null ? emptyList() : directives;
         extensionDirectives = extensionDirectives == null ? emptyList() : extensionDirectives;
-        Set<String> names = new HashSet<>();
+        Set<String> names = new LinkedHashSet<>();
 
         List<GraphQLDirective> output = new ArrayList<>();
         for (Directive directive : directives) {
             if (!names.contains(directive.getName())) {
                 names.add(directive.getName());
-                output.add(schemaGeneratorHelper.buildDirective(directive, directiveLocation));
+                output.add(schemaGeneratorHelper.buildDirective(directive, directiveDefinitions, directiveLocation));
             }
         }
         for (Directive directive : extensionDirectives) {
             if (!names.contains(directive.getName())) {
                 names.add(directive.getName());
-                output.add(schemaGeneratorHelper.buildDirective(directive, directiveLocation));
+                output.add(schemaGeneratorHelper.buildDirective(directive, directiveDefinitions, directiveLocation));
             }
         }
         return output.toArray(new GraphQLDirective[0]);

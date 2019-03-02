@@ -2,15 +2,38 @@ package graphql.schema.idl
 
 import graphql.GraphQLError
 import graphql.TypeResolutionEnvironment
+import graphql.language.StringValue
 import graphql.schema.Coercing
+import graphql.schema.CoercingParseLiteralException
 import graphql.schema.DataFetcher
 import graphql.schema.GraphQLObjectType
 import graphql.schema.GraphQLScalarType
 import graphql.schema.TypeResolver
+import graphql.schema.idl.errors.DirectiveIllegalArgumentTypeError
+import graphql.schema.idl.errors.DirectiveIllegalLocationError
+import graphql.schema.idl.errors.DirectiveUndeclaredError
+import graphql.schema.idl.errors.MissingTypeError
+import graphql.schema.idl.errors.NonUniqueNameError
 import graphql.schema.idl.errors.SchemaMissingError
 import spock.lang.Specification
+import spock.lang.Unroll
+
+import static graphql.schema.idl.errors.DirectiveIllegalArgumentTypeError.DUPLICATED_KEYS_MESSAGE
+import static graphql.schema.idl.errors.DirectiveIllegalArgumentTypeError.EXPECTED_ENUM_MESSAGE
+import static graphql.schema.idl.errors.DirectiveIllegalArgumentTypeError.EXPECTED_LIST_MESSAGE
+import static graphql.schema.idl.errors.DirectiveIllegalArgumentTypeError.EXPECTED_NON_NULL_MESSAGE
+import static graphql.schema.idl.errors.DirectiveIllegalArgumentTypeError.EXPECTED_OBJECT_MESSAGE
+import static graphql.schema.idl.errors.DirectiveIllegalArgumentTypeError.EXPECTED_SCALAR_MESSAGE
+import static graphql.schema.idl.errors.DirectiveIllegalArgumentTypeError.MISSING_REQUIRED_FIELD_MESSAGE
+import static graphql.schema.idl.errors.DirectiveIllegalArgumentTypeError.MUST_BE_VALID_ENUM_VALUE_MESSAGE
+import static graphql.schema.idl.errors.DirectiveIllegalArgumentTypeError.NOT_A_VALID_SCALAR_LITERAL_MESSAGE
+import static graphql.schema.idl.errors.DirectiveIllegalArgumentTypeError.UNKNOWN_FIELDS_MESSAGE
+import static java.lang.String.format
 
 class SchemaTypeCheckerTest extends Specification {
+
+    def enforceSchemaDirectives = false
+
 
     TypeDefinitionRegistry parse(String spec) {
         new SchemaParser().parse(spec)
@@ -87,9 +110,29 @@ class SchemaTypeCheckerTest extends Specification {
                 return null
             }
         })
+        def aCustomDateScalar = new GraphQLScalarType("ACustomDate", "", new Coercing() {
+            @Override
+            Object serialize(Object dataFetcherResult) {
+                return null
+            }
+
+            @Override
+            Object parseValue(Object input) {
+                return null
+            }
+
+            @Override
+            Object parseLiteral(Object input) {
+                if (input instanceof StringValue && "AFailingDate" == input.value) {
+                    throw new CoercingParseLiteralException("Failed!")
+                }
+                return null
+            }
+        })
         def runtimeBuilder = RuntimeWiring.newRuntimeWiring()
                 .wiringFactory(wiringFactory)
                 .scalar(scalesScalar)
+                .scalar(aCustomDateScalar)
                 .type(TypeRuntimeWiring.newTypeWiring("InterfaceType1").typeResolver(resolver))
                 .type(TypeRuntimeWiring.newTypeWiring("InterfaceType2").typeResolver(resolver))
                 .type(TypeRuntimeWiring.newTypeWiring("FooBar").typeResolver(resolver))
@@ -97,7 +140,7 @@ class SchemaTypeCheckerTest extends Specification {
         for (String name : resolvingNames) {
             runtimeBuilder.type(TypeRuntimeWiring.newTypeWiring(name).typeResolver(resolver))
         }
-        return new SchemaTypeChecker().checkTypeRegistry(types, runtimeBuilder.build())
+        return new SchemaTypeChecker().checkTypeRegistry(types, runtimeBuilder.build(), enforceSchemaDirectives)
     }
 
     def "test missing type in object"() {
@@ -1123,9 +1166,7 @@ class SchemaTypeCheckerTest extends Specification {
             extend scalar Scales @directive 
 
             
-            extend scalar NonExistent {
-                E
-            }
+            extend scalar NonExistent @directive
             
         """
 
@@ -1268,4 +1309,219 @@ class SchemaTypeCheckerTest extends Specification {
         errorContaining(result, "The object type 'PlanetsConnection' [@n:n] has tried to redefine field 'edges' defined via interface 'UnpaginatedConnection' [@n:n] from '[Edge]!' to 'PlanetEdge'")
         errorContaining(result, "The object type 'PlanetsConnection' [@n:n] has tried to redefine field 'edges' defined via interface 'UnpaginatedConnection' [@n:n] from '[Edge]!' to 'PlanetEdge'")
     }
+
+    def "directive definition bad location"() {
+        def spec = """
+            directive @badDirective on UNKNOWN 
+                            
+            type Query {
+                f : String
+            }
+        """
+
+        enforceSchemaDirectives = true
+        def result = check(spec)
+
+        expect:
+
+        result.get(0) instanceof DirectiveIllegalLocationError
+    }
+
+    def "directive definition non unique arg name"() {
+        def spec = """
+            directive @badDirective(arg1 : String, arg1 : String) on OBJECT 
+                            
+            type Query {
+                f : String
+            }
+        """
+
+        enforceSchemaDirectives = true
+        def result = check(spec)
+
+        expect:
+
+        result.get(0) instanceof NonUniqueNameError
+    }
+
+    def "directive definition unknown arg type"() {
+        def spec = """
+            directive @badDirective(arg1 : UnknownType, arg2 : String) on OBJECT 
+                            
+            type Query {
+                f : String
+            }
+        """
+
+        enforceSchemaDirectives = true
+        def result = check(spec)
+
+        expect:
+
+        result.get(0) instanceof MissingTypeError
+    }
+
+    def "undeclared directive definition will be caught"() {
+        def spec = """
+            directive @testDirective(knownArg : String = "defaultValue") on SCHEMA | SCALAR | 
+                            OBJECT | FIELD_DEFINITION |
+                            ARGUMENT_DEFINITION | INTERFACE | UNION | 
+                            ENUM | ENUM_VALUE | 
+                            INPUT_OBJECT | INPUT_FIELD_DEFINITION
+
+            type Query {
+                f : String @testDirectiveNotDeclared
+            }
+        """
+
+        enforceSchemaDirectives = true
+        def result = check(spec)
+
+        expect:
+
+        result.get(0) instanceof DirectiveUndeclaredError
+    }
+
+    def "directive definition can be valid"() {
+        def spec = """
+            directive @testDirective(knownArg : String = "defaultValue") on SCHEMA | SCALAR | 
+                            OBJECT | FIELD_DEFINITION |
+                            ARGUMENT_DEFINITION | INTERFACE | UNION | 
+                            ENUM | ENUM_VALUE | 
+                            INPUT_OBJECT | INPUT_FIELD_DEFINITION
+
+            type Query {
+                f : String @testDirective
+            }
+        """
+
+        enforceSchemaDirectives = true
+        def result = check(spec)
+
+        expect:
+
+        result.isEmpty()
+    }
+
+    @Unroll
+    def "directive definition allowed argument type '#allowedArgType' does not match argument value '#argValue'"() {
+        def spec = """
+            directive @testDirective(knownArg : $allowedArgType) on FIELD_DEFINITION
+
+            type Query {
+                f : String @testDirective(knownArg: $argValue)
+            }
+            
+            scalar ACustomDate
+            
+            enum WEEKDAY {
+                MONDAY
+                TUESDAY
+            }
+            
+            input UserInput {
+                field: String
+                fieldNonNull: String!
+                fieldWithDefault: String = "default"
+                # not sure if below makes sense
+                fieldNonNullWithDefault: String! = "default"
+                fieldArray: [String]
+                fieldArrayOfArray: [[String]]
+                fieldNestedInput: AddressInput
+            }
+            
+            input AddressInput {
+                street: String
+            }
+
+        """
+
+        enforceSchemaDirectives = true
+        def result = check(spec)
+
+        expect:
+
+        !result.empty
+        result.get(0) instanceof DirectiveIllegalArgumentTypeError
+        errorContaining(result, "'f' [@n:n] uses an illegal value for the argument 'knownArg' on directive 'testDirective'. $detailedMessage")
+
+        where:
+
+        allowedArgType | argValue                                                                               | detailedMessage
+        "String"       | 'MONDAY'                                                                               | format(EXPECTED_SCALAR_MESSAGE, "EnumValue")
+        "String"       | '{ an: "object" }'                                                                     | format(EXPECTED_SCALAR_MESSAGE, "ObjectValue")
+        "String"       | '["str", "str2"]'                                                                      | format(EXPECTED_SCALAR_MESSAGE, "ArrayValue")
+        "ACustomDate"  | '"AFailingDate"'                                                                       | format(NOT_A_VALID_SCALAR_LITERAL_MESSAGE, "ACustomDate")
+        "[String]"     | '"str"'                                                                                | format(EXPECTED_LIST_MESSAGE, "StringValue")
+        "[String]!"    | '"str"'                                                                                | format(EXPECTED_LIST_MESSAGE, "StringValue")
+        "[String!]"    | '["str", null]'                                                                        | format(EXPECTED_NON_NULL_MESSAGE)
+        "[[String!]!]" | '[["str"], ["str2", null]]'                                                            | format(EXPECTED_NON_NULL_MESSAGE)
+        "WEEKDAY"      | '"somestr"'                                                                            | format(EXPECTED_ENUM_MESSAGE, "StringValue")
+        "WEEKDAY"      | 'SATURDAY'                                                                             | format(MUST_BE_VALID_ENUM_VALUE_MESSAGE, "SATURDAY", "MONDAY,TUESDAY")
+        "UserInput"    | '{ fieldNonNull: "str", fieldNonNull: "dupeKey" }'                                     | format(DUPLICATED_KEYS_MESSAGE, "fieldNonNull")
+        "UserInput"    | '{ fieldNonNull: "str", unknown: "field" }'                                            | format(UNKNOWN_FIELDS_MESSAGE, "unknown", "UserInput")
+        "UserInput"    | '{ fieldNonNull: "str", fieldArray: "strInsteadOfArray" }'                             | format(EXPECTED_LIST_MESSAGE, "StringValue")
+        "UserInput"    | '{ fieldNonNull: "str", fieldArrayOfArray: ["ArrayInsteadOfArrayOfArray"] }'           | format(EXPECTED_LIST_MESSAGE, "StringValue")
+        "UserInput"    | '{ fieldNonNull: "str", fieldNestedInput: "strInsteadOfObject" }'                      | format(EXPECTED_OBJECT_MESSAGE, "StringValue")
+        "UserInput"    | '{ fieldNonNull: "str", fieldNestedInput: { street: { s: "objectInsteadOfString" }} }' | format(EXPECTED_SCALAR_MESSAGE, "ObjectValue")
+        "UserInput"    | '{ field: "missing the `fieldNonNull` entry"}'                                         | format(MISSING_REQUIRED_FIELD_MESSAGE, "fieldNonNull")
+    }
+
+    @Unroll
+    def "directive definition allowed argument type '#allowedArgType' matches argument value '#argValue'"() {
+        def spec = """
+            directive @testDirective(knownArg : $allowedArgType) on FIELD_DEFINITION
+
+            type Query {
+                f : String @testDirective(knownArg: $argValue)
+            }
+            
+            scalar ACustomDate
+           
+            enum WEEKDAY {
+                MONDAY
+            }
+            
+            input UserInput {
+                fieldString: String
+                fieldNonNull: String!
+                fieldWithDefault: String = "default"
+                fieldArray: [String]
+                fieldArrayOfArray: [[String]]
+                fieldNestedInput: AddressInput
+            }
+            
+            input AddressInput {
+                street: String
+            }
+        """
+
+        enforceSchemaDirectives = true
+        def result = check(spec)
+
+        expect:
+
+        result.empty
+
+        where:
+
+        allowedArgType | argValue
+        "String"       | '"str"'
+        "Boolean"      | 'false'
+        "String"       | 'null'
+        "ACustomDate"  | '"TwoThousand-June-Six"'
+        "ACustomDate"  | '2002'
+        "[String]"     | '["str", null]'
+        "[String]"     | 'null'
+        "[String!]!"   | '["str"]'
+        "[[String!]!]" | '[["str"], ["str2", "str3"]]'
+        "WEEKDAY"      | 'MONDAY'
+        "UserInput"    | '{ fieldNonNull: "str" }'
+        "UserInput"    | '{ fieldNonNull: "str", fieldString: "Hey" }'
+        "UserInput"    | '{ fieldNonNull: "str", fieldWithDefault: "notDefault" }'
+        "UserInput"    | '{ fieldNonNull: "str", fieldArray: ["Hey", "Low"] }'
+        "UserInput"    | '{ fieldNonNull: "str", fieldArrayOfArray: [["Hey"], ["Low"]] }'
+        "UserInput"    | '{ fieldNonNull: "str", fieldNestedInput: { street: "nestedStr"} }'
+    }
+
 }

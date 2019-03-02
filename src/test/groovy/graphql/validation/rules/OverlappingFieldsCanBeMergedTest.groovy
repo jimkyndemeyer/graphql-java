@@ -1,10 +1,10 @@
 package graphql.validation.rules
 
+import graphql.TestUtil
 import graphql.TypeResolutionEnvironment
 import graphql.language.Document
 import graphql.language.SourceLocation
 import graphql.parser.Parser
-import graphql.schema.GraphQLNonNull
 import graphql.schema.GraphQLObjectType
 import graphql.schema.GraphQLSchema
 import graphql.schema.TypeResolver
@@ -17,6 +17,8 @@ import spock.lang.Specification
 import static graphql.Scalars.GraphQLInt
 import static graphql.Scalars.GraphQLString
 import static graphql.schema.GraphQLFieldDefinition.newFieldDefinition
+import static graphql.schema.GraphQLList.list
+import static graphql.schema.GraphQLNonNull.nonNull
 import static graphql.schema.GraphQLObjectType.newObject
 import static graphql.schema.GraphQLUnionType.newUnionType
 
@@ -72,7 +74,7 @@ class OverlappingFieldsCanBeMergedTest extends Specification {
         then:
         errorCollector.getErrors().size() == 1
         errorCollector.getErrors()[0].message == "Validation error of type FieldsConflict: myName: name and nickname are different fields @ 'f'"
-        errorCollector.getErrors()[0].locations == [new SourceLocation(3, 17), new SourceLocation(4, 17)]
+        errorCollector.getErrors()[0].locations == [new SourceLocation(4, 17), new SourceLocation(5, 17)]
     }
 
     GraphQLSchema unionSchema() {
@@ -84,16 +86,20 @@ class OverlappingFieldsCanBeMergedTest extends Specification {
                 .build()
 
         def NonNullStringBox1 = newObject().name("NonNullStringBox1")
-                .field(newFieldDefinition().name("scalar").type(new GraphQLNonNull(GraphQLString)))
+                .field(newFieldDefinition().name("scalar").type(nonNull(GraphQLString)))
                 .build()
 
         def NonNullStringBox2 = newObject().name("NonNullStringBox2")
-                .field(newFieldDefinition().name("scalar").type(new GraphQLNonNull(GraphQLString)))
+                .field(newFieldDefinition().name("scalar").type(nonNull(GraphQLString)))
+                .build()
+
+        def ListStringBox1 = newObject().name("ListStringBox1")
+                .field(newFieldDefinition().name("scalar").type(list(GraphQLString)))
                 .build()
 
         def BoxUnion = newUnionType()
                 .name("BoxUnion")
-                .possibleTypes(StringBox, IntBox, NonNullStringBox1, NonNullStringBox2)
+                .possibleTypes(StringBox, IntBox, NonNullStringBox1, NonNullStringBox2, ListStringBox1)
                 .typeResolver(new TypeResolver() {
             @Override
             GraphQLObjectType getType(TypeResolutionEnvironment env) {
@@ -153,6 +159,54 @@ class OverlappingFieldsCanBeMergedTest extends Specification {
 
         then:
         errorCollector.errors.isEmpty()
+    }
+
+    def 'not the same non null return types'() {
+        given:
+        def schema = unionSchema()
+        def query = """
+                {
+                    boxUnion {
+                        ...on StringBox {
+                            scalar
+                        }
+                        ...on NonNullStringBox1 {
+                            scalar
+                        }
+                    }
+                }
+                """
+
+        when:
+        traverse(query, schema)
+
+        then:
+        errorCollector.getErrors().size() == 1
+        errorCollector.getErrors()[0].message == "Validation error of type FieldsConflict: scalar: fields have different nullability shapes @ 'boxUnion'"
+    }
+
+    def 'not the same list return types'() {
+        given:
+        def schema = unionSchema()
+        def query = """
+                {
+                    boxUnion {
+                        ...on StringBox {
+                            scalar
+                        }
+                        ...on ListStringBox1 {
+                            scalar
+                        }
+                    }
+                }
+                """
+
+        when:
+        traverse(query, schema)
+
+        then:
+        errorCollector.getErrors().size() == 1
+        errorCollector.getErrors()[0].message == "Validation error of type FieldsConflict: scalar: fields have different list shapes @ 'boxUnion'"
     }
 
 
@@ -260,7 +314,7 @@ class OverlappingFieldsCanBeMergedTest extends Specification {
         then:
         errorCollector.getErrors().size() == 1
         errorCollector.getErrors()[0].message == "Validation error of type FieldsConflict: fido: name and nickname are different fields @ 'sameAliasesWithDifferentFieldTargets'"
-        errorCollector.getErrors()[0].locations == [new SourceLocation(3, 13), new SourceLocation(4, 13)]
+        errorCollector.getErrors()[0].locations == [new SourceLocation(4, 13), new SourceLocation(5, 13)]
     }
 
     def 'Alias masking direct field access'() {
@@ -277,7 +331,7 @@ class OverlappingFieldsCanBeMergedTest extends Specification {
         then:
         errorCollector.getErrors().size() == 1
         errorCollector.getErrors()[0].message == "Validation error of type FieldsConflict: name: nickname and name are different fields @ 'aliasMaskingDirectFieldAccess'"
-        errorCollector.getErrors()[0].locations == [new SourceLocation(3, 13), new SourceLocation(4, 13)]
+        errorCollector.getErrors()[0].locations == [new SourceLocation(4, 13), new SourceLocation(5, 13)]
     }
 
     def 'conflicting args'() {
@@ -294,7 +348,7 @@ class OverlappingFieldsCanBeMergedTest extends Specification {
         then:
         errorCollector.getErrors().size() == 1
         errorCollector.getErrors()[0].message == "Validation error of type FieldsConflict: doesKnowCommand: they have differing arguments @ 'conflictingArgs'"
-        errorCollector.getErrors()[0].locations == [new SourceLocation(3, 13), new SourceLocation(4, 13)]
+        errorCollector.getErrors()[0].locations == [new SourceLocation(4, 13), new SourceLocation(5, 13)]
     }
 
     //
@@ -337,7 +391,7 @@ class OverlappingFieldsCanBeMergedTest extends Specification {
         then:
         errorCollector.getErrors().size() == 1
         errorCollector.getErrors()[0].message == "Validation error of type FieldsConflict: x: a and b are different fields"
-        errorCollector.getErrors()[0].locations == [new SourceLocation(7, 13), new SourceLocation(10, 13)]
+        errorCollector.getErrors()[0].locations == [new SourceLocation(8, 13), new SourceLocation(11, 13)]
     }
 
     def 'reports each conflict once'() {
@@ -371,13 +425,13 @@ class OverlappingFieldsCanBeMergedTest extends Specification {
         errorCollector.getErrors().size() == 3
 
         errorCollector.getErrors()[0].message == "Validation error of type FieldsConflict: x: a and b are different fields @ 'f1'"
-        errorCollector.getErrors()[0].locations == [new SourceLocation(18, 13), new SourceLocation(21, 13)]
+        errorCollector.getErrors()[0].locations == [new SourceLocation(19, 13), new SourceLocation(22, 13)]
 
         errorCollector.getErrors()[1].message == "Validation error of type FieldsConflict: x: a and c are different fields @ 'f3'"
-        errorCollector.getErrors()[1].locations == [new SourceLocation(18, 13), new SourceLocation(14, 17)]
+        errorCollector.getErrors()[1].locations == [new SourceLocation(19, 13), new SourceLocation(15, 17)]
 
         errorCollector.getErrors()[2].message == "Validation error of type FieldsConflict: x: b and c are different fields @ 'f3'"
-        errorCollector.getErrors()[2].locations == [new SourceLocation(21, 13), new SourceLocation(14, 17)]
+        errorCollector.getErrors()[2].locations == [new SourceLocation(22, 13), new SourceLocation(15, 17)]
     }
 
 
@@ -474,5 +528,103 @@ class OverlappingFieldsCanBeMergedTest extends Specification {
         errorCollector.getErrors()[0].message == "Validation error of type FieldsConflict: deepField: (x: a and b are different fields) @ 'field'"
         errorCollector.getErrors()[0].locations.size() == 4
     }
+
+
+    def "parent type is of List NonNull"() {
+        given:
+        def query = """
+        query (\$id: String!) {
+          services(ids: [\$id]) {
+            componentInfoLocationUrl
+            ...ComponentInformation
+          }
+        }
+
+        fragment ComponentInformation on Component {
+          componentInfoLocationUrl
+        }
+"""
+        def schema = TestUtil.schema("""
+    type Query {
+      services(ids: [String!]): [Component!]
+    }
+
+    type Component {
+      componentInfoLocationUrl: String!
+    }
+""")
+        when:
+        traverse(query, schema)
+
+
+        then:
+        errorCollector.getErrors().size() == 0
+
+    }
+
+    def "parent type is of List List NonNull"() {
+        given:
+        def query = """
+        query (\$id: String!) {
+          services(ids: [\$id]) {
+            componentInfoLocationUrl
+            ...ComponentInformation
+          }
+        }
+
+        fragment ComponentInformation on Component {
+          componentInfoLocationUrl
+        }
+"""
+        def schema = TestUtil.schema("""
+    type Query {
+      services(ids: [String!]): [[Component!]]
+    }
+
+    type Component {
+      componentInfoLocationUrl: String!
+    }
+""")
+        when:
+        traverse(query, schema)
+
+
+        then:
+        errorCollector.getErrors().size() == 0
+
+    }
+
+    def "parent type is of List NonNull and field is nullable"() {
+        given:
+        def query = """
+        query (\$id: String!) {
+          services(ids: [\$id]) {
+            componentInfoLocationUrl
+            ...ComponentInformation
+          }
+        }
+
+        fragment ComponentInformation on Component {
+          componentInfoLocationUrl
+        }
+"""
+        def schema = TestUtil.schema("""
+    type Query {
+      services(ids: [String!]): [Component!]
+    }
+
+    type Component {
+      componentInfoLocationUrl: String
+    }
+""")
+        when:
+        traverse(query, schema)
+
+
+        then:
+        errorCollector.getErrors().size() == 0
+
+    }
+
 
 }

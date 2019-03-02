@@ -2,15 +2,18 @@ package graphql.schema.idl;
 
 import graphql.GraphQLError;
 import graphql.Internal;
+import graphql.introspection.Introspection;
 import graphql.language.Argument;
 import graphql.language.AstPrinter;
 import graphql.language.Directive;
+import graphql.language.DirectiveDefinition;
 import graphql.language.EnumTypeDefinition;
 import graphql.language.EnumValueDefinition;
 import graphql.language.FieldDefinition;
 import graphql.language.InputObjectTypeDefinition;
 import graphql.language.InputValueDefinition;
 import graphql.language.InterfaceTypeDefinition;
+import graphql.language.Node;
 import graphql.language.ObjectTypeDefinition;
 import graphql.language.ObjectTypeExtensionDefinition;
 import graphql.language.OperationTypeDefinition;
@@ -20,6 +23,7 @@ import graphql.language.Type;
 import graphql.language.TypeDefinition;
 import graphql.language.TypeName;
 import graphql.language.UnionTypeDefinition;
+import graphql.schema.idl.errors.DirectiveIllegalLocationError;
 import graphql.schema.idl.errors.InterfaceFieldArgumentRedefinitionError;
 import graphql.schema.idl.errors.InterfaceFieldRedefinitionError;
 import graphql.schema.idl.errors.InvalidDeprecationDirectiveError;
@@ -40,7 +44,7 @@ import graphql.schema.idl.errors.SchemaProblem;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
-import java.util.HashSet;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -61,7 +65,7 @@ import java.util.stream.Collectors;
 @Internal
 public class SchemaTypeChecker {
 
-    public List<GraphQLError> checkTypeRegistry(TypeDefinitionRegistry typeRegistry, RuntimeWiring wiring) throws SchemaProblem {
+    public List<GraphQLError> checkTypeRegistry(TypeDefinitionRegistry typeRegistry, RuntimeWiring wiring, boolean enforceSchemaDirectives) throws SchemaProblem {
         List<GraphQLError> errors = new ArrayList<>();
         checkForMissingTypes(errors, typeRegistry);
 
@@ -77,6 +81,14 @@ public class SchemaTypeChecker {
         checkTypeResolversArePresent(errors, typeRegistry, wiring);
 
         checkFieldsAreSensible(errors, typeRegistry);
+
+        //check directive definitions before checking directive usages
+        checkDirectiveDefinitions(typeRegistry, errors);
+
+        if (enforceSchemaDirectives) {
+            SchemaTypeDirectivesChecker directivesChecker = new SchemaTypeDirectivesChecker(typeRegistry, wiring);
+            directivesChecker.checkTypeDirectives(errors);
+        }
 
         return errors;
     }
@@ -167,6 +179,35 @@ public class SchemaTypeChecker {
 
             inputValueTypes.forEach(checkTypeExists("input value", typeRegistry, errors, inputType));
 
+        });
+    }
+
+    private void checkDirectiveDefinitions(TypeDefinitionRegistry typeRegistry, List<GraphQLError> errors) {
+
+        List<DirectiveDefinition> directiveDefinitions = new ArrayList<>(typeRegistry.getDirectiveDefinitions().values());
+
+        directiveDefinitions.forEach(directiveDefinition -> {
+            List<InputValueDefinition> arguments = directiveDefinition.getInputValueDefinitions();
+
+            checkNamedUniqueness(errors, arguments, InputValueDefinition::getName,
+                    (name, arg) -> new NonUniqueNameError(directiveDefinition, arg));
+
+            List<Type> inputValueTypes = arguments.stream()
+                    .map(InputValueDefinition::getType)
+                    .collect(Collectors.toList());
+
+            inputValueTypes.forEach(
+                    checkTypeExists(typeRegistry, errors, "directive definition", directiveDefinition, directiveDefinition.getName())
+            );
+
+            directiveDefinition.getDirectiveLocations().forEach(directiveLocation -> {
+                String locationName = directiveLocation.getName();
+                try {
+                    Introspection.DirectiveLocation.valueOf(locationName);
+                } catch (IllegalArgumentException e) {
+                    errors.add(new DirectiveIllegalLocationError(directiveDefinition, locationName));
+                }
+            });
         });
     }
 
@@ -332,7 +373,7 @@ public class SchemaTypeChecker {
      * @param errorFunction     the function producing an error
      */
     static <T, E extends GraphQLError> void checkNamedUniqueness(List<GraphQLError> errors, List<T> listOfNamedThings, Function<T, String> namer, BiFunction<String, T, E> errorFunction) {
-        Set<String> names = new HashSet<>();
+        Set<String> names = new LinkedHashSet<>();
         listOfNamedThings.forEach(thing -> {
             String name = namer.apply(thing);
             if (names.contains(name)) {
@@ -392,6 +433,15 @@ public class SchemaTypeChecker {
         };
     }
 
+    private Consumer<Type> checkTypeExists(TypeDefinitionRegistry typeRegistry, List<GraphQLError> errors, String typeOfType, Node element, String elementName) {
+        return ivType -> {
+            TypeName unwrapped = TypeInfo.typeInfo(ivType).getTypeName();
+            if (!typeRegistry.hasType(unwrapped)) {
+                errors.add(new MissingTypeError(typeOfType, element, elementName, unwrapped));
+            }
+        };
+    }
+
     private Consumer<? super Type> checkInterfaceTypeExists(TypeDefinitionRegistry typeRegistry, List<GraphQLError> errors, TypeDefinition typeDefinition) {
         return t -> {
             TypeInfo typeInfo = TypeInfo.typeInfo(t);
@@ -441,7 +491,7 @@ public class SchemaTypeChecker {
                     if (objectFieldDef == null) {
                         errors.add(new MissingInterfaceFieldError(typeOfType, objectTypeDef, interfaceTypeDef, interfaceFieldDef));
                     } else {
-                        if (! typeRegistry.isSubTypeOf(objectFieldDef.getType(), interfaceFieldDef.getType())) {
+                        if (!typeRegistry.isSubTypeOf(objectFieldDef.getType(), interfaceFieldDef.getType())) {
                             String interfaceFieldType = AstPrinter.printAst(interfaceFieldDef.getType());
                             String objectFieldType = AstPrinter.printAst(objectFieldDef.getType());
                             errors.add(new InterfaceFieldRedefinitionError(typeOfType, objectTypeDef, interfaceTypeDef, objectFieldDef, objectFieldType, interfaceFieldType));
@@ -478,7 +528,7 @@ public class SchemaTypeChecker {
 
     private Consumer<OperationTypeDefinition> checkOperationTypesExist(TypeDefinitionRegistry typeRegistry, List<GraphQLError> errors) {
         return op -> {
-            TypeName unwrapped = TypeInfo.typeInfo(op.getType()).getTypeName();
+            TypeName unwrapped = TypeInfo.typeInfo(op.getTypeName()).getTypeName();
             if (!typeRegistry.hasType(unwrapped)) {
                 errors.add(new MissingTypeError("operation", op, op.getName(), unwrapped));
             }
@@ -488,7 +538,7 @@ public class SchemaTypeChecker {
     private Consumer<OperationTypeDefinition> checkOperationTypesAreObjects(TypeDefinitionRegistry typeRegistry, List<GraphQLError> errors) {
         return op -> {
             // make sure it is defined as a ObjectTypeDef
-            Type queryType = op.getType();
+            Type queryType = op.getTypeName();
             Optional<TypeDefinition> type = typeRegistry.getType(queryType);
             type.ifPresent(typeDef -> {
                 if (!(typeDef instanceof ObjectTypeDefinition)) {

@@ -6,6 +6,8 @@ import graphql.language.SourceLocation
 import spock.lang.Specification
 
 import static graphql.Scalars.GraphQLString
+import static graphql.TestUtil.mergedField
+import static graphql.TestUtil.mergedSelectionSet
 import static graphql.execution.ExecutionStrategyParameters.newParameters
 import static graphql.schema.GraphQLFieldDefinition.newFieldDefinition
 import static graphql.schema.GraphQLObjectType.newObject
@@ -24,14 +26,13 @@ class AbsoluteGraphQLErrorTest extends Specification {
     def "constructor works as expected"() {
         given:
 
-        def field = new Field("test")
-        field.setSourceLocation(new SourceLocation(4, 5))
+        def field = Field.newField().name("test").sourceLocation(new SourceLocation(4, 5)).build()
 
         def parameters = newParameters()
-                .typeInfo(ExecutionTypeInfo.newTypeInfo().type(objectType))
+                .executionStepInfo(ExecutionStepInfo.newExecutionStepInfo().type(objectType))
                 .source(new Object())
-                .fields(["fld": [new Field()]])
-                .field([field])
+                .fields(mergedSelectionSet(["fld": mergedField([Field.newField().build()])]))
+                .field(mergedField(field))
                 .path(ExecutionPath.fromList(["foo", "bar"]))
                 .build()
 
@@ -60,14 +61,13 @@ class AbsoluteGraphQLErrorTest extends Specification {
     def "constructor handles missing path as null"() {
         given:
 
-        def field = new Field("test")
-        field.setSourceLocation(new SourceLocation(4, 5))
+        def field = Field.newField().name("test").sourceLocation(new SourceLocation(4, 5)).build()
 
         def parameters = newParameters()
-                .typeInfo(ExecutionTypeInfo.newTypeInfo().type(objectType))
+                .executionStepInfo(ExecutionStepInfo.newExecutionStepInfo().type(objectType))
                 .source(new Object())
-                .fields(["fld": [new Field()]])
-                .field([field])
+                .fields(mergedSelectionSet(["fld": mergedField(Field.newField().build())]))
+                .field(mergedField(field))
                 .path(ExecutionPath.fromList(["foo", "bar"]))
                 .build()
 
@@ -85,14 +85,13 @@ class AbsoluteGraphQLErrorTest extends Specification {
     def "when constructor receives empty path it should return the base field path"() {
         given:
 
-        def field = new Field("test")
-        field.setSourceLocation(new SourceLocation(4, 5))
+        def field = Field.newField().name("test").sourceLocation(new SourceLocation(4, 5)).build()
 
         def parameters = newParameters()
-                .typeInfo(ExecutionTypeInfo.newTypeInfo().type(objectType))
+                .executionStepInfo(ExecutionStepInfo.newExecutionStepInfo().type(objectType))
                 .source(new Object())
-                .fields(["fld": [new Field()]])
-                .field([field])
+                .fields(mergedSelectionSet(["fld": mergedField(Field.newField().build())]))
+                .field(mergedField(field))
                 .path(ExecutionPath.fromList(["foo", "bar"]))
                 .build()
 
@@ -111,13 +110,13 @@ class AbsoluteGraphQLErrorTest extends Specification {
     def "constructor handles missing locations as null"() {
         given:
 
-        def field = new Field("test")
+        def field = Field.newField().name("test").build()
 
         def parameters = newParameters()
-                .typeInfo(ExecutionTypeInfo.newTypeInfo().type(objectType))
+                .executionStepInfo(ExecutionStepInfo.newExecutionStepInfo().type(objectType))
                 .source(new Object())
-                .fields(["fld": [new Field()]])
-                .field([field])
+                .fields(mergedSelectionSet(["fld": mergedField(Field.newField().build())]))
+                .field(mergedField(field))
                 .path(ExecutionPath.fromList(["foo", "bar"]))
                 .build()
 
@@ -135,15 +134,14 @@ class AbsoluteGraphQLErrorTest extends Specification {
     def "when constructor receives empty locations it should return the base field locations"() {
         given:
 
-        def field = new Field("test")
         def expectedSourceLocation = new SourceLocation(1, 2)
-        field.setSourceLocation(expectedSourceLocation)
+        def field = Field.newField().name("test").sourceLocation(expectedSourceLocation).build()
 
         def parameters = newParameters()
-                .typeInfo(ExecutionTypeInfo.newTypeInfo().type(objectType))
+                .executionStepInfo(ExecutionStepInfo.newExecutionStepInfo().type(objectType))
                 .source(new Object())
-                .fields(["fld": [new Field()]])
-                .field([field])
+                .fields(mergedSelectionSet(["fld": mergedField(Field.newField().build())]))
+                .field(mergedField(field))
                 .path(ExecutionPath.fromList(["foo", "bar"]))
                 .build()
 
@@ -161,14 +159,13 @@ class AbsoluteGraphQLErrorTest extends Specification {
     def "constructor transforms multiple source locations"() {
         given:
 
-        def field = new Field("test")
-        field.setSourceLocation(new SourceLocation(4, 5))
+        def field = Field.newField().name("test").sourceLocation(new SourceLocation(4, 5)).build()
 
         def parameters = newParameters()
-                .typeInfo(ExecutionTypeInfo.newTypeInfo().type(objectType))
+                .executionStepInfo(ExecutionStepInfo.newExecutionStepInfo().type(objectType))
                 .source(new Object())
-                .fields(["fld": [new Field()]])
-                .field([field])
+                .fields(mergedSelectionSet(["fld": mergedField(Field.newField().build())]))
+                .field(mergedField(field))
                 .path(ExecutionPath.fromList(["foo", "bar"]))
                 .build()
 

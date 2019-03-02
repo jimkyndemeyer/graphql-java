@@ -12,9 +12,8 @@ class NodeTraverserTest extends Specification {
     def "traverse nodes in depth first"() {
         given:
         Field leaf = new Field("leaf")
-        SelectionSet rootSelectionSet = new SelectionSet(Arrays.asList(leaf))
-        Field root = new Field("root")
-        root.setSelectionSet(rootSelectionSet)
+        SelectionSet rootSelectionSet = SelectionSet.newSelectionSet().selections(Arrays.asList(leaf)).build()
+        Field root = Field.newField().name("root").selectionSet(rootSelectionSet).build()
 
         NodeTraverser nodeTraverser = new NodeTraverser()
         NodeVisitor nodeVisitor = Mock(NodeVisitor)
@@ -27,6 +26,69 @@ class NodeTraverserTest extends Specification {
         1 * nodeVisitor.visitSelectionSet(rootSelectionSet, { isEnter(it) }) >> TraversalControl.CONTINUE
         then:
         1 * nodeVisitor.visitField(leaf, { isEnter(it) }) >> TraversalControl.CONTINUE
+        then:
+        1 * nodeVisitor.visitField(leaf, { isLeave(it) }) >> TraversalControl.CONTINUE
+        then:
+        1 * nodeVisitor.visitSelectionSet(rootSelectionSet, { isLeave(it) }) >> TraversalControl.CONTINUE
+        then:
+        1 * nodeVisitor.visitField(root, { isLeave(it) }) >> TraversalControl.CONTINUE
+        then:
+        0 * nodeVisitor._
+    }
+
+    def "traverse nodes returns accumulate"() {
+        given:
+        Field leaf = new Field("leaf")
+        SelectionSet rootSelectionSet = SelectionSet.newSelectionSet().selections(Arrays.asList(leaf)).build()
+        Field root = Field.newField().name("root").selectionSet(rootSelectionSet).build()
+
+        NodeTraverser nodeTraverser = new NodeTraverser()
+        NodeVisitor nodeVisitor = new NodeVisitorStub() {
+            @Override
+            TraversalControl visitField(Field node, TraverserContext<Node> context) {
+                context.setAccumulate("RESULT")
+                return TraversalControl.CONTINUE
+            }
+        }
+        when:
+        def result = nodeTraverser.depthFirst(nodeVisitor, root)
+
+        then:
+        result == "RESULT"
+    }
+
+    def "traverse nodes in pre-order"() {
+        given:
+        Field leaf = Field.newField().name("leaf").build()
+        SelectionSet rootSelectionSet = SelectionSet.newSelectionSet().selections(Arrays.asList(leaf)).build()
+        Field root = Field.newField().name("root").selectionSet(rootSelectionSet).build()
+
+        NodeTraverser nodeTraverser = new NodeTraverser()
+        NodeVisitor nodeVisitor = Mock(NodeVisitor)
+        when:
+        nodeTraverser.preOrder(nodeVisitor, root)
+
+        then:
+        1 * nodeVisitor.visitField(root, { isEnter(it) }) >> TraversalControl.CONTINUE
+        then:
+        1 * nodeVisitor.visitSelectionSet(rootSelectionSet, { isEnter(it) }) >> TraversalControl.CONTINUE
+        then:
+        1 * nodeVisitor.visitField(leaf, { isEnter(it) }) >> TraversalControl.CONTINUE
+        then:
+        0 * nodeVisitor._
+    }
+
+    def "traverse nodes in post-order"() {
+        given:
+        Field leaf = Field.newField().name("leaf").build()
+        SelectionSet rootSelectionSet = SelectionSet.newSelectionSet().selections(Arrays.asList(leaf)).build()
+        Field root = Field.newField().name("root").selectionSet(rootSelectionSet).build()
+
+        NodeTraverser nodeTraverser = new NodeTraverser()
+        NodeVisitor nodeVisitor = Mock(NodeVisitor)
+        when:
+        nodeTraverser.postOrder(nodeVisitor, root)
+
         then:
         1 * nodeVisitor.visitField(leaf, { isLeave(it) }) >> TraversalControl.CONTINUE
         then:
@@ -74,10 +136,10 @@ class NodeTraverserTest extends Specification {
         def visitor = new NodeVisitorStub() {
             @Override
             TraversalControl visitField(Field node, TraverserContext<Node> context) {
-                context.setResult(node)
+                context.setAccumulate(node)
             }
         }
-        def field = new Field()
+        def field = Field.newField().build()
         when:
         def result = NodeTraverser.oneVisitWithResult(field, visitor);
         then:

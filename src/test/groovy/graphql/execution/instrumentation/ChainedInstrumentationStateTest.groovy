@@ -62,7 +62,7 @@ class ChainedInstrumentationStateTest extends Specification {
         }
 
         @Override
-        InstrumentationContext<CompletableFuture<ExecutionResult>> beginExecutionStrategy(InstrumentationExecutionStrategyParameters parameters) {
+        ExecutionStrategyInstrumentationContext beginExecutionStrategy(InstrumentationExecutionStrategyParameters parameters) {
             assertState(parameters.getInstrumentationState())
             return super.beginExecutionStrategy(parameters)
         }
@@ -207,14 +207,14 @@ class ChainedInstrumentationStateTest extends Specification {
 
     private void assertCalls(NamedInstrumentation instrumentation) {
         assert instrumentation.dfInvocations[0].getFieldDefinition().name == 'hero'
-        assert instrumentation.dfInvocations[0].getFieldTypeInfo().getPath().toList() == ['hero']
-        assert instrumentation.dfInvocations[0].getFieldTypeInfo().getType().name == 'Character'
-        assert !instrumentation.dfInvocations[0].getFieldTypeInfo().isNonNullType()
+        assert instrumentation.dfInvocations[0].getExecutionStepInfo().getPath().toList() == ['hero']
+        assert instrumentation.dfInvocations[0].getExecutionStepInfo().getUnwrappedNonNullType().name == 'Character'
+        assert !instrumentation.dfInvocations[0].getExecutionStepInfo().isNonNullType()
 
         assert instrumentation.dfInvocations[1].getFieldDefinition().name == 'id'
-        assert instrumentation.dfInvocations[1].getFieldTypeInfo().getPath().toList() == ['hero', 'id']
-        assert instrumentation.dfInvocations[1].getFieldTypeInfo().getType().name == 'String'
-        assert instrumentation.dfInvocations[1].getFieldTypeInfo().isNonNullType()
+        assert instrumentation.dfInvocations[1].getExecutionStepInfo().getPath().toList() == ['hero', 'id']
+        assert instrumentation.dfInvocations[1].getExecutionStepInfo().getUnwrappedNonNullType().name == 'String'
+        assert instrumentation.dfInvocations[1].getExecutionStepInfo().isNonNullType()
     }
 
 }

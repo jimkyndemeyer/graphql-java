@@ -9,6 +9,7 @@ import graphql.execution.ExecutionIdProvider
 import graphql.execution.ExecutionStrategyParameters
 import graphql.execution.MissingRootTypeException
 import graphql.execution.batched.BatchedExecutionStrategy
+import graphql.execution.instrumentation.ChainedInstrumentation
 import graphql.execution.instrumentation.Instrumentation
 import graphql.execution.instrumentation.SimpleInstrumentation
 import graphql.language.SourceLocation
@@ -17,7 +18,6 @@ import graphql.schema.DataFetchingEnvironment
 import graphql.schema.GraphQLEnumType
 import graphql.schema.GraphQLFieldDefinition
 import graphql.schema.GraphQLInterfaceType
-import graphql.schema.GraphQLList
 import graphql.schema.GraphQLNonNull
 import graphql.schema.GraphQLObjectType
 import graphql.schema.GraphQLSchema
@@ -38,6 +38,7 @@ import static graphql.schema.GraphQLArgument.newArgument
 import static graphql.schema.GraphQLFieldDefinition.newFieldDefinition
 import static graphql.schema.GraphQLInputObjectField.newInputObjectField
 import static graphql.schema.GraphQLInputObjectType.newInputObject
+import static graphql.schema.GraphQLList.list
 import static graphql.schema.GraphQLObjectType.newObject
 import static graphql.schema.GraphQLSchema.newSchema
 import static graphql.schema.GraphQLTypeReference.typeRef
@@ -168,7 +169,7 @@ class GraphQLTest extends Specification {
                         .type(GraphQLString)
                         .argument(newArgument()
                         .name("arg")
-                        .type(new GraphQLNonNull(GraphQLString))))
+                        .type(GraphQLNonNull.nonNull(GraphQLString))))
                         .build()
         ).build()
 
@@ -193,7 +194,7 @@ class GraphQLTest extends Specification {
                 .name("QueryType")
                 .field(newFieldDefinition()
                 .name("set")
-                .type(new GraphQLList(GraphQLString))
+                .type(list(GraphQLString))
                 .dataFetcher({ set })))
                 .build()
 
@@ -435,7 +436,7 @@ class GraphQLTest extends Specification {
         given:
         def dataFetcher = Mock(DataFetcher)
         def inputObject = newInputObject().name("bar")
-                .field(newInputObjectField().name("list").type(new GraphQLList(GraphQLString)).build())
+                .field(newInputObjectField().name("list").type(list(GraphQLString)).build())
                 .build()
         GraphQLSchema schema = newSchema().query(
                 newObject()
@@ -466,7 +467,7 @@ class GraphQLTest extends Specification {
         given:
         def dataFetcher = Mock(DataFetcher)
         def inputObject = newInputObject().name("bar")
-                .field(newInputObjectField().name("list").type(new GraphQLList(GraphQLString)).build())
+                .field(newInputObjectField().name("list").type(list(GraphQLString)).build())
                 .build()
         GraphQLSchema schema = newSchema().query(
                 newObject()
@@ -498,7 +499,7 @@ class GraphQLTest extends Specification {
         given:
         def dataFetcher = Mock(DataFetcher)
         def inputObject = newInputObject().name("bar")
-                .field(newInputObjectField().name("list").type(new GraphQLList(GraphQLString)).build())
+                .field(newInputObjectField().name("list").type(list(GraphQLString)).build())
                 .build()
         GraphQLSchema schema = newSchema().query(
                 newObject()
@@ -812,6 +813,7 @@ class GraphQLTest extends Specification {
 
         GraphQLSchema schema = newSchema()
                 .query(query)
+                .additionalType(foo)
                 .build()
 
         GraphQL graphQL = GraphQL.newGraphQL(schema)
@@ -868,7 +870,8 @@ class GraphQLTest extends Specification {
         then:
         result == [hello: 'world']
         queryStrategy.executionId == hello
-        queryStrategy.instrumentation == instrumentation
+        queryStrategy.instrumentation instanceof ChainedInstrumentation
+        (queryStrategy.instrumentation as ChainedInstrumentation).getInstrumentations().contains(instrumentation)
 
         when:
 
@@ -890,7 +893,9 @@ class GraphQLTest extends Specification {
         then:
         result == [hello: 'world']
         queryStrategy.executionId == goodbye
-        queryStrategy.instrumentation == newInstrumentation
+        queryStrategy.instrumentation instanceof ChainedInstrumentation
+        (queryStrategy.instrumentation as ChainedInstrumentation).getInstrumentations().contains(newInstrumentation)
+        ! (queryStrategy.instrumentation as ChainedInstrumentation).getInstrumentations().contains(instrumentation)
     }
 
     def "query with triple quoted multi line strings"() {

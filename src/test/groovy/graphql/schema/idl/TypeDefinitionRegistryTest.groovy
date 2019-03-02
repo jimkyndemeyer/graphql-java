@@ -1,15 +1,28 @@
 package graphql.schema.idl
 
+
+import graphql.language.DirectiveDefinition
+import graphql.language.EnumTypeDefinition
+import graphql.language.EnumTypeExtensionDefinition
+import graphql.language.InputObjectTypeDefinition
+import graphql.language.InputObjectTypeExtensionDefinition
 import graphql.language.InterfaceTypeDefinition
+import graphql.language.InterfaceTypeExtensionDefinition
 import graphql.language.ListType
 import graphql.language.NonNullType
 import graphql.language.ObjectTypeDefinition
+import graphql.language.ObjectTypeExtensionDefinition
+import graphql.language.ScalarTypeDefinition
+import graphql.language.ScalarTypeExtensionDefinition
 import graphql.language.SchemaDefinition
 import graphql.language.Type
 import graphql.language.TypeName
+import graphql.language.UnionTypeDefinition
+import graphql.language.UnionTypeExtensionDefinition
 import graphql.schema.idl.errors.SchemaProblem
 import graphql.schema.idl.errors.SchemaRedefinitionError
 import spock.lang.Specification
+import spock.lang.Unroll
 
 class TypeDefinitionRegistryTest extends Specification {
 
@@ -42,8 +55,8 @@ class TypeDefinitionRegistryTest extends Specification {
 
     def "adding 2 schemas is not allowed"() {
         def registry = new TypeDefinitionRegistry()
-        def result1 = registry.add(new SchemaDefinition())
-        def result2 = registry.add(new SchemaDefinition())
+        def result1 = registry.add(SchemaDefinition.newSchemaDefinition().build())
+        def result2 = registry.add(SchemaDefinition.newSchemaDefinition().build())
 
         expect:
         !result1.isPresent()
@@ -166,9 +179,46 @@ class TypeDefinitionRegistryTest extends Specification {
         e.getErrors().get(0).getMessage().contains("tried to redefine existing 'Url'")
     }
 
+    def "test merge of directive defs"() {
+
+        def spec1 = """ 
+
+          directive @example on FIELD_DEFINITION | ARGUMENT_DEFINITION
+
+          type Post {
+              id: Int!
+            }
+            
+        """
+
+        def spec2 = """ 
+         
+         type Post2 {
+            id : Int
+        }
+         
+          directive @example on FIELD_DEFINITION | ARGUMENT_DEFINITION
+
+        """
+
+        def result1 = parse(spec1)
+        def result2 = parse(spec2)
+
+        when:
+        result1.merge(result2)
+
+        then:
+
+        SchemaProblem e = thrown(SchemaProblem)
+        e.getErrors().get(0).getMessage().contains("tried to redefine existing directive 'example'")
+    }
+
     def "test successful merge of types"() {
 
         def spec1 = """ 
+
+          directive @example on FIELD_DEFINITION | ARGUMENT_DEFINITION
+
           type Post {
               id: Int!
               title: String
@@ -181,7 +231,10 @@ class TypeDefinitionRegistryTest extends Specification {
 
         """
 
-        def spec2 = """ 
+        def spec2 = """
+
+          directive @anotherExample on FIELD_DEFINITION | ARGUMENT_DEFINITION
+ 
           type Author {
               id: Int!
               name: String
@@ -217,6 +270,9 @@ class TypeDefinitionRegistryTest extends Specification {
 
         def typeExtensions = result1.objectTypeExtensions().get("Post")
         typeExtensions.size() == 2
+
+        result1.getDirectiveDefinitions().get("example") != null
+        result1.getDirectiveDefinitions().get("anotherExample") != null
     }
 
     def commonSpec = '''
@@ -419,7 +475,140 @@ class TypeDefinitionRegistryTest extends Specification {
 
         // unwraps all the way down
         registry.isSubTypeOf(listType(nonNullType(listType(type("Dog")))), listType(nonNullType(listType(type("Mammal")))))
-        ! registry.isSubTypeOf(listType(nonNullType(listType(type("Turtle")))), listType(nonNullType(listType(type("Mammal")))))
+        !registry.isSubTypeOf(listType(nonNullType(listType(type("Turtle")))), listType(nonNullType(listType(type("Mammal")))))
 
+    }
+
+    @Unroll
+    def "remove a definition"() {
+        given:
+        def registry = new TypeDefinitionRegistry()
+        registry.add(definition)
+        when:
+        registry.remove(definition)
+        then:
+        !registry.getType(definition.getName()).isPresent()
+
+        where:
+        definition                                                               | _
+        ObjectTypeDefinition.newObjectTypeDefinition().name("foo").build()       | _
+        InterfaceTypeDefinition.newInterfaceTypeDefinition().name("foo").build() | _
+        UnionTypeDefinition.newUnionTypeDefinition().name("foo").build()         | _
+        EnumTypeDefinition.newEnumTypeDefinition().name("foo").build()           | _
+        ScalarTypeDefinition.newScalarTypeDefinition().name("foo").build()       | _
+        InputObjectTypeDefinition.newInputObjectDefinition().name("foo").build() | _
+    }
+
+    def "remove directive definition"() {
+        given:
+        DirectiveDefinition definition = DirectiveDefinition.newDirectiveDefinition().name("foo").build()
+        def registry = new TypeDefinitionRegistry()
+        registry.add(definition)
+        when:
+        registry.remove(definition)
+        then:
+        !registry.getDirectiveDefinition(definition.getName()).isPresent()
+    }
+
+
+    def "remove object type extension"() {
+        given:
+        def extension = ObjectTypeExtensionDefinition.newObjectTypeExtensionDefinition().name("foo").build()
+        def registry = new TypeDefinitionRegistry()
+        registry.add(extension)
+        when:
+        registry.remove(extension)
+        then:
+        !registry.objectTypeExtensions().get(extension.getName()).contains(extension)
+    }
+
+    def "remove interface type extension"() {
+        given:
+        def extension = InterfaceTypeExtensionDefinition.newInterfaceTypeExtensionDefinition().name("foo").build()
+        def registry = new TypeDefinitionRegistry()
+        registry.add(extension)
+        when:
+        registry.remove(extension)
+        then:
+        !registry.interfaceTypeExtensions().get(extension.getName()).contains(extension)
+    }
+
+    def "remove union type extension"() {
+        given:
+        def extension = UnionTypeExtensionDefinition.newUnionTypeExtensionDefinition().name("foo").build()
+        def registry = new TypeDefinitionRegistry()
+        registry.add(extension)
+        when:
+        registry.remove(extension)
+        then:
+        !registry.unionTypeExtensions().get(extension.getName()).contains(extension)
+    }
+
+    def "remove enum type extension"() {
+        given:
+        def extension = EnumTypeExtensionDefinition.newEnumTypeExtensionDefinition().name("foo").build()
+        def registry = new TypeDefinitionRegistry()
+        registry.add(extension)
+        when:
+        registry.remove(extension)
+        then:
+        !registry.enumTypeExtensions().get(extension.getName()).contains(extension)
+    }
+
+    def "remove scalar type extension"() {
+        given:
+        def extension = ScalarTypeExtensionDefinition.newScalarTypeExtensionDefinition().name("foo").build()
+        def registry = new TypeDefinitionRegistry()
+        registry.add(extension)
+        when:
+        registry.remove(extension)
+        then:
+        !registry.scalarTypeExtensions().get(extension.getName()).contains(extension)
+    }
+
+    def "remove input object type extension"() {
+        given:
+        def extension = InputObjectTypeExtensionDefinition.newInputObjectTypeExtensionDefinition().name("foo").build()
+        def registry = new TypeDefinitionRegistry()
+        registry.add(extension)
+        when:
+        registry.remove(extension)
+        then:
+        !registry.inputObjectTypeExtensions().get(extension.getName()).contains(extension)
+    }
+
+    def "remove schema definition"() {
+        given:
+        def registry = new TypeDefinitionRegistry()
+        def definition = SchemaDefinition.newSchemaDefinition().build()
+        registry.add(definition)
+        when:
+        registry.remove(definition)
+        then:
+        !registry.schemaDefinition().isPresent()
+    }
+
+    def "addAll can add multiple things successfully"() {
+        def obj1 = ObjectTypeDefinition.newObjectTypeDefinition().name("foo").build()
+        def obj2 = ObjectTypeDefinition.newObjectTypeDefinition().name("bar").build()
+        def registry = new TypeDefinitionRegistry()
+        when:
+        registry.addAll(Arrays.asList(obj1, obj2))
+        then:
+        registry.getType("foo").isPresent()
+        registry.getType("bar").isPresent()
+    }
+
+    def "addAll will return an error on the first abd thing"() {
+        def obj1 = ObjectTypeDefinition.newObjectTypeDefinition().name("foo").build()
+        def obj2 = ObjectTypeDefinition.newObjectTypeDefinition().name("bar").build()
+        def obj3 = ObjectTypeDefinition.newObjectTypeDefinition().name("bar").build()
+        def obj4 = ObjectTypeDefinition.newObjectTypeDefinition().name("foo").build()
+        def registry = new TypeDefinitionRegistry()
+        when:
+        def error = registry.addAll(Arrays.asList(obj1, obj2, obj3, obj4))
+        then:
+        error.isPresent()
+        error.get().getMessage().contains("tried to redefine existing 'bar' type")
     }
 }
